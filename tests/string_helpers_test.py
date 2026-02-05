@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from pyupgrade._string_helpers import parse_format
-from pyupgrade._string_helpers import unparse_parsed_string
+from pybreakingfix._string_helpers import parse_format
+from pybreakingfix._string_helpers import unparse_parsed_string
 
 
 @pytest.mark.parametrize(

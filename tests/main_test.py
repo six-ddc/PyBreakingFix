@@ -1,32 +1,32 @@
 from __future__ import annotations
 
 import io
-import re
 import sys
 from unittest import mock
 
 import pytest
 
-from pyupgrade._main import main
+from pybreakingfix._main import main
 
 
 def test_main_trivial():
     assert main(()) == 0
 
 
-def test_main_noop(tmpdir, capsys):
+def test_main_help(capsys):
     with pytest.raises(SystemExit):
         main(('--help',))
     out, err = capsys.readouterr()
-    version_options = sorted(set(re.findall(r'--py\d+-plus', out)))
+    assert '--check' in out
+    assert '3.7 -> 3.12' in out
 
+
+def test_main_noop(tmpdir):
     s = '''\
 from sys import version_info
-x=version_info
+x = version_info
 def f():
     global x, y
-
-f'hello snowman: \\N{SNOWMAN}'
 '''
     f = tmpdir.join('f.py')
     f.write(s)
@@ -34,25 +34,21 @@ f'hello snowman: \\N{SNOWMAN}'
     assert main((f.strpath,)) == 0
     assert f.read() == s
 
-    for version_option in version_options:
-        assert main((f.strpath, version_option)) == 0
-        assert f.read() == s
-
 
 def test_main_changes_a_file(tmpdir, capsys):
     f = tmpdir.join('f.py')
-    f.write('x = set((1, 2, 3))\n')
+    f.write('from collections import Mapping\n')
     assert main((f.strpath,)) == 1
     out, err = capsys.readouterr()
     assert err == f'Rewriting {f.strpath}\n'
-    assert f.read() == 'x = {1, 2, 3}\n'
+    assert f.read() == 'from collections.abc import Mapping\n'
 
 
-def test_main_keeps_line_endings(tmpdir, capsys):
+def test_main_keeps_line_endings(tmpdir):
     f = tmpdir.join('f.py')
-    f.write_binary(b'x = set((1, 2, 3))\r\n')
+    f.write_binary(b'from collections import Mapping\r\n')
     assert main((f.strpath,)) == 1
-    assert f.read_binary() == b'x = {1, 2, 3}\r\n'
+    assert f.read_binary() == b'from collections.abc import Mapping\r\n'
 
 
 def test_main_syntax_error(tmpdir):
@@ -66,135 +62,48 @@ def test_main_non_utf8_bytes(tmpdir, capsys):
     f.write_binary('# -*- coding: cp1252 -*-\nx = €\n'.encode('cp1252'))
     assert main((f.strpath,)) == 1
     out, _ = capsys.readouterr()
-    assert out == f'{f.strpath} is non-utf-8 (not supported)\n'
+    assert 'non-utf-8' in out
 
 
-def test_keep_percent_format(tmpdir):
+def test_main_check_mode(tmpdir, capsys):
+    """Test --check mode doesn't modify files."""
     f = tmpdir.join('f.py')
-    f.write('"%s" % (1,)')
-    assert main((f.strpath, '--keep-percent-format')) == 0
-    assert f.read() == '"%s" % (1,)'
-    assert main((f.strpath,)) == 1
-    assert f.read() == '"{}".format(1)'
+    f.write('from collections import Mapping\n')
+    assert main((f.strpath, '--check')) == 1
+    out, err = capsys.readouterr()
+    assert 'would be rewritten' in out
+    # File should not be modified
+    assert f.read() == 'from collections import Mapping\n'
 
 
-def test_keep_mock(tmpdir):
+def test_main_check_mode_no_changes(tmpdir, capsys):
+    """Test --check mode with no changes."""
     f = tmpdir.join('f.py')
-    f.write('from mock import patch\n')
-    assert main((f.strpath, '--keep-mock')) == 0
-    assert f.read() == 'from mock import patch\n'
-    assert main((f.strpath,)) == 1
-    assert f.read() == 'from unittest.mock import patch\n'
+    f.write('from collections.abc import Mapping\n')
+    assert main((f.strpath, '--check')) == 0
 
 
-def test_py3_plus_argument_unicode_literals(tmpdir):
+def test_main_removed_modules(tmpdir, capsys):
+    """Test that removed modules are detected and reported."""
     f = tmpdir.join('f.py')
-    f.write('u""')
-    assert main((f.strpath,)) == 1
-    assert f.read() == '""'
-
-
-def test_py3_plus_super(tmpdir):
-    f = tmpdir.join('f.py')
-    f.write(
-        'class C(Base):\n'
-        '    def f(self):\n'
-        '        super(C, self).f()\n',
-    )
-    assert main((f.strpath,)) == 1
-    assert f.read() == (
-        'class C(Base):\n'
-        '    def f(self):\n'
-        '        super().f()\n'
-    )
-
-
-def test_py3_plus_new_style_classes(tmpdir):
-    f = tmpdir.join('f.py')
-    f.write('class C(object): pass\n')
-    assert main((f.strpath,)) == 1
-    assert f.read() == 'class C: pass\n'
-
-
-def test_py3_plus_oserror(tmpdir):
-    f = tmpdir.join('f.py')
-    f.write('raise EnvironmentError(1, 2)\n')
-    assert main((f.strpath,)) == 1
-    assert f.read() == 'raise OSError(1, 2)\n'
-
-
-def test_py36_plus_fstrings(tmpdir):
-    f = tmpdir.join('f.py')
-    f.write('"{} {}".format(hello, world)')
-    assert main((f.strpath,)) == 0
-    assert f.read() == '"{} {}".format(hello, world)'
-    assert main((f.strpath, '--py36-plus')) == 1
-    assert f.read() == 'f"{hello} {world}"'
-
-
-def test_py37_plus_removes_annotations(tmpdir):
-    f = tmpdir.join('f.py')
-    f.write('from __future__ import generator_stop\nx = 1\n')
-    assert main((f.strpath,)) == 0
-    assert main((f.strpath, '--py36-plus')) == 0
-    assert main((f.strpath, '--py37-plus')) == 1
-    assert f.read() == 'x = 1\n'
-
-
-def test_py38_plus_removes_no_arg_decorators(tmpdir):
-    f = tmpdir.join('f.py')
-    f.write(
-        'import functools\n\n'
-        '@functools.lru_cache()\n'
-        'def expensive():\n'
-        '   ...',
-    )
-    assert main((f.strpath,)) == 0
-    assert main((f.strpath, '--py36-plus')) == 0
-    assert main((f.strpath, '--py37-plus')) == 0
-    assert main((f.strpath, '--py38-plus')) == 1
-    assert f.read() == (
-        'import functools\n\n'
-        '@functools.lru_cache\n'
-        'def expensive():\n'
-        '   ...'
-    )
-
-
-def test_noop_token_error(tmpdir):
-    f = tmpdir.join('f.py')
-    f.write(
-        # force some rewrites (ast is ok https://bugs.python.org/issue2180)
-        'set(())\n'
-        '"%s" % (1,)\n'
-        'six.b("foo")\n'
-        '"{}".format(a)\n'
-        # token error
-        'x = \\\n'
-        '5\\\n',
-    )
-    assert main((f.strpath, '--py36-plus')) == 0
-
-
-def test_main_exit_zero_even_if_changed(tmpdir):
-    f = tmpdir.join('t.py')
-    f.write('set((1, 2))\n')
-    assert not main((str(f), '--exit-zero-even-if-changed'))
-    assert f.read() == '{1, 2}\n'
-    assert not main((str(f), '--exit-zero-even-if-changed'))
+    f.write('import distutils\n')
+    assert main((f.strpath,)) == 2  # EXIT_FATAL
+    out, err = capsys.readouterr()
+    assert 'distutils' in err
+    assert 'removed' in err.lower()
 
 
 def test_main_stdin_no_changes(capsys):
-    stdin = io.TextIOWrapper(io.BytesIO(b'{1, 2}\n'), 'UTF-8')
+    stdin = io.TextIOWrapper(io.BytesIO(b'x = 1\n'), 'UTF-8')
     with mock.patch.object(sys, 'stdin', stdin):
         assert main(('-',)) == 0
     out, err = capsys.readouterr()
-    assert out == '{1, 2}\n'
+    assert out == 'x = 1\n'
 
 
 def test_main_stdin_with_changes(capsys):
-    stdin = io.TextIOWrapper(io.BytesIO(b'set((1, 2))\n'), 'UTF-8')
+    stdin = io.TextIOWrapper(io.BytesIO(b'from collections import Mapping\n'), 'UTF-8')
     with mock.patch.object(sys, 'stdin', stdin):
         assert main(('-',)) == 1
     out, err = capsys.readouterr()
-    assert out == '{1, 2}\n'
+    assert out == 'from collections.abc import Mapping\n'
